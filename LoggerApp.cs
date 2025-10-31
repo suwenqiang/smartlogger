@@ -104,10 +104,10 @@ namespace SimpleLoggerApp
 
                 UpdateLogText(string.Format("[{0}] 开始记录logcat\r\n", DateTime.Now));
 
-                // 开始记录logcat
+                // 开始记录logcat - 保留 -v time 参数
                 adbProcess = new Process();
                 adbProcess.StartInfo.FileName = "adb";
-                adbProcess.StartInfo.Arguments = "logcat -v time";
+                adbProcess.StartInfo.Arguments = "logcat -v time"; // 保留 -v time 参数
                 adbProcess.StartInfo.UseShellExecute = false;
                 adbProcess.StartInfo.RedirectStandardOutput = true;
                 adbProcess.StartInfo.RedirectStandardError = true;
@@ -120,7 +120,8 @@ namespace SimpleLoggerApp
                 {
                     if (!string.IsNullOrEmpty(e.Data) && isLogging)
                     {
-                        string logEntry = e.Data + "\r\n"; // 使用 \r\n 确保正确换行
+                        // 在每一行前面添加PC系统当前时间
+                        string logEntry = string.Format("[PC:{0}] {1}\r\n", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"), e.Data);
                         UpdateLogText(logEntry);
                         try
                         {
@@ -137,7 +138,8 @@ namespace SimpleLoggerApp
                 {
                     if (!string.IsNullOrEmpty(e.Data) && isLogging)
                     {
-                        string errorEntry = string.Format("[ERROR] {0}\r\n", e.Data); // 使用 \r\n 确保正确换行
+                        // 在每一行前面添加PC系统当前时间
+                        string errorEntry = string.Format("[PC:{0}] [ERROR] {1}\r\n", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"), e.Data);
                         UpdateLogText(errorEntry);
                         try
                         {
