@@ -18,11 +18,9 @@ namespace SimpleLoggerApp
         private string logFileName;
         private Thread logThread;
         
-        // 循环缓冲区相关变量
-        private Queue<string> logBuffer;
-        private const int MAX_LINES = 1000;
-        private bool isInitializing = true;
-        private List<string> initialMessages;
+        // 循环缓冲区相关变量 - 仅用于界面显示
+        private Queue<string> displayBuffer;
+        private const int MAX_DISPLAY_LINES = 1000;
 
         public MainForm()
         {
@@ -31,9 +29,8 @@ namespace SimpleLoggerApp
 
         private void InitializeComponent()
         {
-            // 初始化循环缓冲区
-            logBuffer = new Queue<string>(MAX_LINES);
-            initialMessages = new List<string>();
+            // 初始化循环缓冲区 - 仅用于界面显示
+            displayBuffer = new Queue<string>(MAX_DISPLAY_LINES);
             
             // 创建按钮
             btnStart = new Button() { Text = "开始记录", Location = new System.Drawing.Point(10, 10), Size = new System.Drawing.Size(80, 30) };
@@ -65,10 +62,8 @@ namespace SimpleLoggerApp
             btnStop.Enabled = true;
             isLogging = true;
             
-            // 清空缓冲区
-            logBuffer.Clear();
-            initialMessages.Clear();
-            isInitializing = true;
+            // 清空显示缓冲区
+            displayBuffer.Clear();
 
             // 生成日志文件名
             logFileName = string.Format("UnitAging_test_{0:yyyyMMdd}_{0:HHmm}.log", DateTime.Now);
@@ -78,9 +73,9 @@ namespace SimpleLoggerApp
             File.AppendAllText(logFileName, string.Format("UnitAging Test Started at {0}\r\n", DateTime.Now));
             File.AppendAllText(logFileName, "=======================================\r\n");
 
-            // 添加初始消息到缓冲区
-            AddLogToBuffer(string.Format("[{0}] 开始记录日志到文件: {1}", DateTime.Now, logFileName));
-            AddLogToBuffer(string.Format("[{0}] 等待设备连接...", DateTime.Now));
+            // 添加初始消息到显示缓冲区
+            AddToDisplayBuffer(string.Format("[{0}] 开始记录日志到文件: {1}", DateTime.Now, logFileName));
+            AddToDisplayBuffer(string.Format("[{0}] 等待设备连接...", DateTime.Now));
             
             // 在新线程中执行日志记录，避免阻塞UI
             logThread = new Thread(new ThreadStart(LoggingWorker));
@@ -105,7 +100,7 @@ namespace SimpleLoggerApp
                     waitProcess.WaitForExit();
                 }
 
-                AddLogToBuffer(string.Format("[{0}] 设备已连接", DateTime.Now));
+                AddToDisplayBuffer(string.Format("[{0}] 设备已连接", DateTime.Now));
 
                 // 清空日志缓存
                 using (Process clearProcess = new Process())
@@ -119,20 +114,7 @@ namespace SimpleLoggerApp
                 }
 
                 // 修改提示信息
-                AddLogToBuffer(string.Format("[{0}] 开始记录logcat,本窗口只显示1000行，完整log保存在{1}文件中", DateTime.Now, logFileName));
-                
-                // 初始化阶段结束
-                isInitializing = false;
-                
-                // 保存初始消息
-                foreach (string message in initialMessages)
-                {
-                    logBuffer.Enqueue(message);
-                }
-                initialMessages.Clear();
-                
-                // 更新显示
-                UpdateLogDisplay();
+                AddToDisplayBuffer(string.Format("[{0}] 开始记录logcat,本窗口只显示1000行，完整log保存在{1}文件中", DateTime.Now, logFileName));
 
                 // 开始记录logcat - 保留 -v time 参数
                 adbProcess = new Process();
@@ -152,14 +134,18 @@ namespace SimpleLoggerApp
                     {
                         // 在每一行前面添加PC系统当前时间
                         string logEntry = string.Format("[PC:{0}] {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"), e.Data);
-                        AddLogToBuffer(logEntry);
+                        
+                        // 添加到显示缓冲区
+                        AddToDisplayBuffer(logEntry);
+                        
+                        // 直接写入文件 - 不经过缓冲区
                         try
                         {
                             File.AppendAllText(logFileName, logEntry + "\r\n");
                         }
                         catch (Exception ex)
                         {
-                            AddLogToBuffer(string.Format("[{0}] 文件写入错误: {1}", DateTime.Now, ex.Message));
+                            AddToDisplayBuffer(string.Format("[{0}] 文件写入错误: {1}", DateTime.Now, ex.Message));
                         }
                     }
                 };
@@ -170,14 +156,18 @@ namespace SimpleLoggerApp
                     {
                         // 在每一行前面添加PC系统当前时间
                         string errorEntry = string.Format("[PC:{0}] [ERROR] {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"), e.Data);
-                        AddLogToBuffer(errorEntry);
+                        
+                        // 添加到显示缓冲区
+                        AddToDisplayBuffer(errorEntry);
+                        
+                        // 直接写入文件 - 不经过缓冲区
                         try
                         {
                             File.AppendAllText(logFileName, errorEntry + "\r\n");
                         }
                         catch (Exception ex)
                         {
-                            AddLogToBuffer(string.Format("[{0}] 文件写入错误: {1}", DateTime.Now, ex.Message));
+                            AddToDisplayBuffer(string.Format("[{0}] 文件写入错误: {1}", DateTime.Now, ex.Message));
                         }
                     }
                 };
@@ -189,39 +179,31 @@ namespace SimpleLoggerApp
                 // 等待进程结束
                 adbProcess.WaitForExit();
                 
-                AddLogToBuffer(string.Format("[{0}] Logcat进程结束", DateTime.Now));
+                AddToDisplayBuffer(string.Format("[{0}] Logcat进程结束", DateTime.Now));
             }
             catch (Exception ex)
             {
-                AddLogToBuffer(string.Format("[{0}] 错误: {1}", DateTime.Now, ex.Message));
+                AddToDisplayBuffer(string.Format("[{0}] 错误: {1}", DateTime.Now, ex.Message));
             }
         }
 
-        private void AddLogToBuffer(string logLine)
+        private void AddToDisplayBuffer(string logLine)
         {
-            if (isInitializing)
+            // 只对显示使用循环缓冲区
+            lock (displayBuffer)
             {
-                // 在初始化阶段，保存初始消息
-                initialMessages.Add(logLine);
-            }
-            else
-            {
-                // 正常阶段，使用循环缓冲区
-                lock (logBuffer)
+                // 如果缓冲区已满，移除最旧的一行
+                if (displayBuffer.Count >= MAX_DISPLAY_LINES)
                 {
-                    // 如果缓冲区已满，移除最旧的一行
-                    if (logBuffer.Count >= MAX_LINES)
-                    {
-                        logBuffer.Dequeue();
-                    }
-                    
-                    // 添加新行
-                    logBuffer.Enqueue(logLine);
+                    displayBuffer.Dequeue();
                 }
                 
-                // 更新显示
-                UpdateLogDisplay();
+                // 添加新行
+                displayBuffer.Enqueue(logLine);
             }
+            
+            // 更新显示
+            UpdateLogDisplay();
         }
 
         private void UpdateLogDisplay()
@@ -240,23 +222,12 @@ namespace SimpleLoggerApp
                 // 构建显示文本
                 StringBuilder displayText = new StringBuilder();
                 
-                // 添加初始化消息（如果有）
-                if (isInitializing)
+                // 添加缓冲区中的所有行
+                lock (displayBuffer)
                 {
-                    foreach (string message in initialMessages)
+                    foreach (string line in displayBuffer)
                     {
-                        displayText.AppendLine(message);
-                    }
-                }
-                else
-                {
-                    // 添加缓冲区中的所有行
-                    lock (logBuffer)
-                    {
-                        foreach (string line in logBuffer)
-                        {
-                            displayText.AppendLine(line);
-                        }
+                        displayText.AppendLine(line);
                     }
                 }
                 
@@ -284,11 +255,11 @@ namespace SimpleLoggerApp
                 }
                 catch (Exception ex)
                 {
-                    AddLogToBuffer(string.Format("[{0}] 停止进程时出错: {1}", DateTime.Now, ex.Message));
+                    AddToDisplayBuffer(string.Format("[{0}] 停止进程时出错: {1}", DateTime.Now, ex.Message));
                 }
             }
             
-            AddLogToBuffer(string.Format("[{0}] 日志记录已停止", DateTime.Now));
+            AddToDisplayBuffer(string.Format("[{0}] 日志记录已停止", DateTime.Now));
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
