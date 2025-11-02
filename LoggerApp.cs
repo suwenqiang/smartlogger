@@ -26,6 +26,12 @@ namespace SimpleLoggerApp
         private System.Windows.Forms.Timer uiUpdateTimer;
         private volatile bool uiUpdateNeeded = false;
         private readonly object displayLock = new object();
+        
+        // 设备状态监控
+        private System.Windows.Forms.Timer deviceCheckTimer;
+        private DateTime lastLogTime = DateTime.MinValue;
+        private const int DEVICE_CHECK_INTERVAL = 2000; // 2秒检查一次
+        private volatile bool isAdbProcessRunning = false;
 
         public MainForm()
         {
@@ -55,6 +61,11 @@ namespace SimpleLoggerApp
                 }
             };
             uiUpdateTimer.Start();
+            
+            // 初始化设备检查定时器
+            deviceCheckTimer = new System.Windows.Forms.Timer();
+            deviceCheckTimer.Interval = DEVICE_CHECK_INTERVAL;
+            deviceCheckTimer.Tick += CheckDeviceStatus;
         }
 
         private bool CheckAdbEnvironment()
@@ -117,6 +128,7 @@ namespace SimpleLoggerApp
             btnStart.Enabled = false;
             btnStop.Enabled = true;
             isLogging = true;
+            lastLogTime = DateTime.Now;
             
             // 清空显示缓冲区
             lock (displayLock)
@@ -135,6 +147,9 @@ namespace SimpleLoggerApp
             // 添加初始消息到显示缓冲区
             AddToDisplayBuffer(string.Format("[{0}] 开始记录日志到文件: {1}", DateTime.Now, logFileName));
             AddToDisplayBuffer(string.Format("[{0}] 等待设备连接...", DateTime.Now));
+            
+            // 启动设备检查定时器
+            deviceCheckTimer.Start();
             
             // 在新线程中执行日志记录，避免阻塞UI
             logThread = new Thread(new ThreadStart(LoggingWorker));
@@ -163,7 +178,7 @@ namespace SimpleLoggerApp
                         waitProcess.Start();
                         
                         // 使用带超时的等待，避免永久阻塞
-                        if (!waitProcess.WaitForExit(30000)) // 30秒超时
+                        if (!waitProcess.WaitForExit(10000)) // 10秒超时
                         {
                             AddToDisplayBuffer(string.Format("[{0}] 等待设备超时，重新尝试...", DateTime.Now));
                             waitProcess.Kill();
@@ -192,6 +207,8 @@ namespace SimpleLoggerApp
                     using (Process currentAdbProcess = new Process())
                     {
                         adbProcess = currentAdbProcess; // 保持引用以便必要时终止
+                        isAdbProcessRunning = true;
+                        
                         currentAdbProcess.StartInfo.FileName = "adb";
                         currentAdbProcess.StartInfo.Arguments = "logcat -v time";
                         currentAdbProcess.StartInfo.UseShellExecute = false;
@@ -205,13 +222,20 @@ namespace SimpleLoggerApp
                         using (var processExitEvent = new ManualResetEvent(false))
                         {
                             currentAdbProcess.EnableRaisingEvents = true;
-                            currentAdbProcess.Exited += (s, e) => processExitEvent.Set();
+                            currentAdbProcess.Exited += (s, e) => 
+                            {
+                                processExitEvent.Set();
+                                isAdbProcessRunning = false;
+                            };
 
                             // 实时读取输出
                             currentAdbProcess.OutputDataReceived += (sender, e) =>
                             {
                                 if (!string.IsNullOrEmpty(e.Data) && isLogging)
                                 {
+                                    // 更新最后日志时间
+                                    lastLogTime = DateTime.Now;
+                                    
                                     // 在每一行前面添加PC系统当前时间
                                     string logEntry = string.Format("[PC:{0}] {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"), e.Data);
                                     
@@ -234,6 +258,9 @@ namespace SimpleLoggerApp
                             {
                                 if (!string.IsNullOrEmpty(e.Data) && isLogging)
                                 {
+                                    // 更新最后日志时间
+                                    lastLogTime = DateTime.Now;
+                                    
                                     // 在每一行前面添加PC系统当前时间
                                     string errorEntry = string.Format("[PC:{0}] [ERROR] {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"), e.Data);
                                     
@@ -257,9 +284,9 @@ namespace SimpleLoggerApp
                             currentAdbProcess.BeginErrorReadLine();
                             
                             // 使用带超时的等待，而不是无限期等待
-                            while (isLogging && !processExitEvent.WaitOne(1000))
+                            while (isLogging && !processExitEvent.WaitOne(500)) // 500毫秒检查一次
                             {
-                                // 每秒检查一次是否应该停止
+                                // 每500毫秒检查一次是否应该停止
                             }
                             
                             // 如果仍在记录状态但进程已退出，说明是意外退出
@@ -282,13 +309,80 @@ namespace SimpleLoggerApp
                     if (isLogging)
                     {
                         AddToDisplayBuffer(string.Format("[{0}] 错误: {1}", DateTime.Now, ex.Message));
-                        AddToDisplayBuffer(string.Format("[{0}] 5秒后尝试重新连接...", DateTime.Now));
-                        Thread.Sleep(5000); // 重试前等待
+                        AddToDisplayBuffer(string.Format("[{0}] 2秒后尝试重新连接...", DateTime.Now));
+                        Thread.Sleep(2000); // 重试前等待
                     }
                 }
             }
             
             AddToDisplayBuffer(string.Format("[{0}] 日志记录已停止", DateTime.Now));
+        }
+
+        private void CheckDeviceStatus(object sender, EventArgs e)
+        {
+            if (!isLogging) return;
+            
+            // 检查最后日志时间，如果超过10秒没有新日志，认为设备可能已断开
+            if ((DateTime.Now - lastLogTime).TotalSeconds > 10)
+            {
+                // 检查设备是否真的断开
+                bool deviceConnected = CheckDeviceConnected();
+                if (!deviceConnected && isAdbProcessRunning)
+                {
+                    AddToDisplayBuffer(string.Format("[{0}] 检测到设备断开，正在重新连接...", DateTime.Now));
+                    try
+                    {
+                        // 安全地检查并终止ADB进程
+                        if (adbProcess != null && !adbProcess.HasExited)
+                        {
+                            adbProcess.Kill();
+                        }
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // 忽略"没有与此对象关联的进程"异常
+                        isAdbProcessRunning = false;
+                    }
+                    catch (Exception ex)
+                    {
+                        AddToDisplayBuffer(string.Format("[{0}] 终止ADB进程时出错: {1}", DateTime.Now, ex.Message));
+                    }
+                }
+            }
+        }
+
+        private bool CheckDeviceConnected()
+        {
+            try
+            {
+                using (Process process = new Process())
+                {
+                    process.StartInfo.FileName = "adb";
+                    process.StartInfo.Arguments = "devices";
+                    process.StartInfo.UseShellExecute = false;
+                    process.StartInfo.CreateNoWindow = true;
+                    process.StartInfo.RedirectStandardOutput = true;
+                    process.Start();
+                    
+                    string output = process.StandardOutput.ReadToEnd();
+                    process.WaitForExit(3000);
+                    
+                    // 检查输出中是否包含设备（排除头行）
+                    string[] lines = output.Split('\n');
+                    for (int i = 1; i < lines.Length; i++)
+                    {
+                        if (lines[i].Trim().EndsWith("device"))
+                        {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private void AddToDisplayBuffer(string logLine)
@@ -310,77 +404,120 @@ namespace SimpleLoggerApp
             uiUpdateNeeded = true;
         }
 
-        private void UpdateLogDisplay()
+private void UpdateLogDisplay()
+{
+    if (this.InvokeRequired)
+    {
+        if (!this.IsDisposed)
         {
-            if (this.InvokeRequired)
+            this.BeginInvoke(new Action(UpdateLogDisplay));
+        }
+        return;
+    }
+    
+    if (!this.IsDisposed && txtLog != null && !txtLog.IsDisposed)
+    {
+        try
+        {
+            // 保存当前滚动位置
+            int firstVisibleLine = GetFirstVisibleLine();
+            int selectionStart = txtLog.SelectionStart;
+            bool wasAtBottom = IsScrolledToBottom();
+            
+            // 构建显示文本
+            StringBuilder displayText = new StringBuilder();
+            
+            // 添加缓冲区中的所有行
+            lock (displayLock)
             {
-                if (!this.IsDisposed)
+                foreach (string line in displayBuffer)
                 {
-                    this.BeginInvoke(new Action(UpdateLogDisplay));
+                    displayText.AppendLine(line);
                 }
-                return;
             }
             
-            if (!this.IsDisposed && txtLog != null && !txtLog.IsDisposed)
+            // 更新文本框
+            txtLog.Text = displayText.ToString();
+            
+            // 恢复滚动位置
+            if (wasAtBottom || displayBuffer.Count <= 1)
             {
-                // 构建显示文本
-                StringBuilder displayText = new StringBuilder();
-                
-                // 添加缓冲区中的所有行
-                lock (displayLock)
-                {
-                    foreach (string line in displayBuffer)
-                    {
-                        displayText.AppendLine(line);
-                    }
-                }
-                
-                // 保存当前滚动位置
-                int firstCharIndex = txtLog.GetCharIndexFromPosition(new System.Drawing.Point(0, 0));
-                int selectionStart = txtLog.SelectionStart;
-                bool isAtBottom = (txtLog.GetCharIndexFromPosition(new System.Drawing.Point(0, txtLog.ClientSize.Height - 1)) >= txtLog.TextLength - 10);
-                
-                // 更新文本框
-                txtLog.Text = displayText.ToString();
-                
-                // 恢复滚动位置或滚动到底部
-                if (isAtBottom)
-                {
-                    txtLog.SelectionStart = txtLog.TextLength;
-                    txtLog.ScrollToCaret();
-                }
-                else
-                {
-                    txtLog.SelectionStart = Math.Min(selectionStart, txtLog.TextLength);
-                    try
-                    {
-                        txtLog.ScrollToCaret();
-                    }
-                    catch
-                    {
-                        // 忽略滚动异常
-                    }
-                }
+                // 如果之前是在底部或者这是第一次更新，滚动到底部
+                txtLog.SelectionStart = txtLog.TextLength;
+                txtLog.ScrollToCaret();
+            }
+            else
+            {
+                // 否则恢复之前的滚动位置
+                SetFirstVisibleLine(firstVisibleLine);
+                txtLog.SelectionStart = Math.Min(selectionStart, txtLog.TextLength);
             }
         }
+        catch (Exception)
+        {
+            // 忽略UI更新异常，避免程序崩溃
+#if DEBUG
+            System.Diagnostics.Debug.WriteLine("UI更新异常");
+#endif
+        }
+    }
+}
 
+// 获取第一个可见行的索引
+private int GetFirstVisibleLine()
+{
+    const int EM_GETFIRSTVISIBLELINE = 0x00CE;
+    return SendMessage(txtLog.Handle, EM_GETFIRSTVISIBLELINE, 0, 0);
+}
+
+// 设置第一个可见行
+private void SetFirstVisibleLine(int line)
+{
+    const int EM_LINESCROLL = 0x00B6;
+    SendMessage(txtLog.Handle, EM_LINESCROLL, 0, line);
+}
+
+// 导入Windows API
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+private static extern int SendMessage(IntPtr hWnd, int wMsg, int wParam, int lParam);
+
+private bool IsScrolledToBottom()
+{
+    // 检查是否滚动到底部
+    int visibleLines = txtLog.ClientSize.Height / txtLog.Font.Height;
+    int firstVisibleLine = GetFirstVisibleLine();
+    int totalLines = txtLog.Lines.Length;
+    
+    return firstVisibleLine + visibleLines >= totalLines - 1;
+}
         private void StopLogging()
         {
             isLogging = false;
             btnStart.Enabled = true;
             btnStop.Enabled = false;
+            
+            // 停止设备检查定时器
+            deviceCheckTimer.Stop();
 
-            if (adbProcess != null && !adbProcess.HasExited)
+            try
             {
-                try
+                if (adbProcess != null && !adbProcess.HasExited)
                 {
                     adbProcess.Kill();
-                    adbProcess = null;
                 }
-                catch (Exception ex)
-                {
-                    AddToDisplayBuffer(string.Format("[{0}] 停止进程时出错: {1}", DateTime.Now, ex.Message));
-                }
+            }
+            catch (InvalidOperationException)
+            {
+                // 忽略"没有与此对象关联的进程"异常
+            }
+            catch (Exception ex)
+            {
+                AddToDisplayBuffer(string.Format("[{0}] 停止进程时出错: {1}", DateTime.Now, ex.Message));
+            }
+            finally
+            {
+                adbProcess = null;
+                isAdbProcessRunning = false;
             }
             
             AddToDisplayBuffer(string.Format("[{0}] 日志记录已停止", DateTime.Now));
@@ -395,6 +532,13 @@ namespace SimpleLoggerApp
             {
                 uiUpdateTimer.Stop();
                 uiUpdateTimer.Dispose();
+            }
+            
+            // 停止设备检查定时器
+            if (deviceCheckTimer != null)
+            {
+                deviceCheckTimer.Stop();
+                deviceCheckTimer.Dispose();
             }
             
             // 等待日志线程结束
