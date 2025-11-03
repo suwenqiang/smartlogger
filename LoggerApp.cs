@@ -157,199 +157,237 @@ namespace SimpleLoggerApp
             logThread.Start();
         }
 
-        private void LoggingWorker()
+private void LoggingWorker()
+{
+    while (isLogging)
+    {
+        try
         {
-            while (isLogging)
+            if (!isLogging) break;
+            
+            // 等待设备
+            AddToDisplayBuffer(string.Format("[{0}] 等待设备连接...", DateTime.Now));
+            using (Process waitProcess = new Process())
             {
-                try
+                waitProcess.StartInfo.FileName = "adb";
+                waitProcess.StartInfo.Arguments = "wait-for-device";
+                waitProcess.StartInfo.UseShellExecute = false;
+                waitProcess.StartInfo.CreateNoWindow = true;
+                waitProcess.StartInfo.RedirectStandardOutput = true;
+                waitProcess.StartInfo.RedirectStandardError = true;
+                waitProcess.Start();
+                
+                // 使用带超时的等待，避免永久阻塞
+                if (!waitProcess.WaitForExit(10000)) // 10秒超时
                 {
-                    if (!isLogging) break;
-                    
-                    // 等待设备
-                    AddToDisplayBuffer(string.Format("[{0}] 等待设备连接...", DateTime.Now));
-                    using (Process waitProcess = new Process())
-                    {
-                        waitProcess.StartInfo.FileName = "adb";
-                        waitProcess.StartInfo.Arguments = "wait-for-device";
-                        waitProcess.StartInfo.UseShellExecute = false;
-                        waitProcess.StartInfo.CreateNoWindow = true;
-                        waitProcess.StartInfo.RedirectStandardOutput = true;
-                        waitProcess.StartInfo.RedirectStandardError = true;
-                        waitProcess.Start();
-                        
-                        // 使用带超时的等待，避免永久阻塞
-                        if (!waitProcess.WaitForExit(10000)) // 10秒超时
-                        {
-                            AddToDisplayBuffer(string.Format("[{0}] 等待设备超时，重新尝试...", DateTime.Now));
-                            waitProcess.Kill();
-                            continue;
-                        }
-                    }
-
-                    if (!isLogging) break;
-                    AddToDisplayBuffer(string.Format("[{0}] 设备已连接", DateTime.Now));
-
-                    // 清空日志缓存
-                    using (Process clearProcess = new Process())
-                    {
-                        clearProcess.StartInfo.FileName = "adb";
-                        clearProcess.StartInfo.Arguments = "logcat -c";
-                        clearProcess.StartInfo.UseShellExecute = false;
-                        clearProcess.StartInfo.CreateNoWindow = true;
-                        clearProcess.Start();
-                        clearProcess.WaitForExit(5000); // 5秒超时
-                    }
-
-                    // 修改提示信息
-                    AddToDisplayBuffer(string.Format("[{0}] 开始记录logcat,本窗口只显示1000行，完整log保存在{1}文件中", DateTime.Now, logFileName));
-
-                    // 开始记录logcat - 保留 -v time 参数
-                    using (Process currentAdbProcess = new Process())
-                    {
-                        adbProcess = currentAdbProcess; // 保持引用以便必要时终止
-                        isAdbProcessRunning = true;
-                        
-                        currentAdbProcess.StartInfo.FileName = "adb";
-                        currentAdbProcess.StartInfo.Arguments = "logcat -v time";
-                        currentAdbProcess.StartInfo.UseShellExecute = false;
-                        currentAdbProcess.StartInfo.RedirectStandardOutput = true;
-                        currentAdbProcess.StartInfo.RedirectStandardError = true;
-                        currentAdbProcess.StartInfo.CreateNoWindow = true;
-                        currentAdbProcess.StartInfo.StandardOutputEncoding = Encoding.UTF8;
-                        currentAdbProcess.StartInfo.StandardErrorEncoding = Encoding.UTF8;
-
-                        // 使用ManualResetEvent来监控进程状态
-                        using (var processExitEvent = new ManualResetEvent(false))
-                        {
-                            currentAdbProcess.EnableRaisingEvents = true;
-                            currentAdbProcess.Exited += (s, e) => 
-                            {
-                                processExitEvent.Set();
-                                isAdbProcessRunning = false;
-                            };
-
-                            // 实时读取输出
-                            currentAdbProcess.OutputDataReceived += (sender, e) =>
-                            {
-                                if (!string.IsNullOrEmpty(e.Data) && isLogging)
-                                {
-                                    // 更新最后日志时间
-                                    lastLogTime = DateTime.Now;
-                                    
-                                    // 在每一行前面添加PC系统当前时间
-                                    string logEntry = string.Format("[PC:{0}] {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"), e.Data);
-                                    
-                                    // 添加到显示缓冲区
-                                    AddToDisplayBuffer(logEntry);
-                                    
-                                    // 直接写入文件 - 不经过缓冲区
-                                    try
-                                    {
-                                        File.AppendAllText(logFileName, logEntry + "\r\n");
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        AddToDisplayBuffer(string.Format("[{0}] 文件写入错误: {1}", DateTime.Now, ex.Message));
-                                    }
-                                }
-                            };
-
-                            currentAdbProcess.ErrorDataReceived += (sender, e) =>
-                            {
-                                if (!string.IsNullOrEmpty(e.Data) && isLogging)
-                                {
-                                    // 更新最后日志时间
-                                    lastLogTime = DateTime.Now;
-                                    
-                                    // 在每一行前面添加PC系统当前时间
-                                    string errorEntry = string.Format("[PC:{0}] [ERROR] {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"), e.Data);
-                                    
-                                    // 添加到显示缓冲区
-                                    AddToDisplayBuffer(errorEntry);
-                                    
-                                    // 直接写入文件 - 不经过缓冲区
-                                    try
-                                    {
-                                        File.AppendAllText(logFileName, errorEntry + "\r\n");
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        AddToDisplayBuffer(string.Format("[{0}] 文件写入错误: {1}", DateTime.Now, ex.Message));
-                                    }
-                                }
-                            };
-
-                            currentAdbProcess.Start();
-                            currentAdbProcess.BeginOutputReadLine();
-                            currentAdbProcess.BeginErrorReadLine();
-                            
-                            // 使用带超时的等待，而不是无限期等待
-                            while (isLogging && !processExitEvent.WaitOne(500)) // 500毫秒检查一次
-                            {
-                                // 每500毫秒检查一次是否应该停止
-                            }
-                            
-                            // 如果仍在记录状态但进程已退出，说明是意外退出
-                            if (isLogging && currentAdbProcess.HasExited)
-                            {
-                                AddToDisplayBuffer(string.Format("[{0}] ADB进程意外退出，退出代码: {1}", DateTime.Now, currentAdbProcess.ExitCode));
-                            }
-                        }
-                    }
-                    
-                    // 如果仍在记录状态，说明进程意外退出（如设备断开）
-                    // 将循环回去重新等待设备连接
-                    if (isLogging)
-                    {
-                        AddToDisplayBuffer(string.Format("[{0}] 设备连接断开，等待重新连接...", DateTime.Now));
-                    }
-                }
-                catch (Exception ex)
-                {
-                    if (isLogging)
-                    {
-                        AddToDisplayBuffer(string.Format("[{0}] 错误: {1}", DateTime.Now, ex.Message));
-                        AddToDisplayBuffer(string.Format("[{0}] 2秒后尝试重新连接...", DateTime.Now));
-                        Thread.Sleep(2000); // 重试前等待
-                    }
+                    AddToDisplayBuffer(string.Format("[{0}] 等待设备超时，重新尝试...", DateTime.Now));
+                    waitProcess.Kill();
+                    continue;
                 }
             }
-            
-            AddToDisplayBuffer(string.Format("[{0}] 日志记录已停止", DateTime.Now));
-        }
 
-        private void CheckDeviceStatus(object sender, EventArgs e)
-        {
-            if (!isLogging) return;
+            if (!isLogging) break;
             
-            // 检查最后日志时间，如果超过10秒没有新日志，认为设备可能已断开
-            if ((DateTime.Now - lastLogTime).TotalSeconds > 10)
+            // 设备已连接 - 添加连接日志
+            string connectMessage = string.Format("[{0}] adb devices reconnected", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+            AddToDisplayBuffer(connectMessage);
+            try
             {
-                // 检查设备是否真的断开
-                bool deviceConnected = CheckDeviceConnected();
-                if (!deviceConnected && isAdbProcessRunning)
+                File.AppendAllText(logFileName, connectMessage + "\r\n");
+            }
+            catch (Exception ex)
+            {
+                AddToDisplayBuffer(string.Format("[{0}] 文件写入错误: {1}", DateTime.Now, ex.Message));
+            }
+
+            // 清空日志缓存
+            using (Process clearProcess = new Process())
+            {
+                clearProcess.StartInfo.FileName = "adb";
+                clearProcess.StartInfo.Arguments = "logcat -c";
+                clearProcess.StartInfo.UseShellExecute = false;
+                clearProcess.StartInfo.CreateNoWindow = true;
+                clearProcess.Start();
+                clearProcess.WaitForExit(5000); // 5秒超时
+            }
+
+            // 修改提示信息
+            AddToDisplayBuffer(string.Format("[{0}] 开始记录logcat,本窗口只显示1000行，完整log保存在{1}文件中", DateTime.Now, logFileName));
+
+            // 开始记录logcat - 保留 -v time 参数
+            using (Process currentAdbProcess = new Process())
+            {
+                adbProcess = currentAdbProcess; // 保持引用以便必要时终止
+                isAdbProcessRunning = true;
+                
+                currentAdbProcess.StartInfo.FileName = "adb";
+                currentAdbProcess.StartInfo.Arguments = "logcat -v time";
+                currentAdbProcess.StartInfo.UseShellExecute = false;
+                currentAdbProcess.StartInfo.RedirectStandardOutput = true;
+                currentAdbProcess.StartInfo.RedirectStandardError = true;
+                currentAdbProcess.StartInfo.CreateNoWindow = true;
+                currentAdbProcess.StartInfo.StandardOutputEncoding = Encoding.UTF8;
+                currentAdbProcess.StartInfo.StandardErrorEncoding = Encoding.UTF8;
+
+                // 使用ManualResetEvent来监控进程状态
+                using (var processExitEvent = new ManualResetEvent(false))
                 {
-                    AddToDisplayBuffer(string.Format("[{0}] 检测到设备断开，正在重新连接...", DateTime.Now));
-                    try
+                    currentAdbProcess.EnableRaisingEvents = true;
+                    currentAdbProcess.Exited += (s, e) => 
                     {
-                        // 安全地检查并终止ADB进程
-                        if (adbProcess != null && !adbProcess.HasExited)
-                        {
-                            adbProcess.Kill();
-                        }
-                    }
-                    catch (InvalidOperationException)
-                    {
-                        // 忽略"没有与此对象关联的进程"异常
+                        processExitEvent.Set();
                         isAdbProcessRunning = false;
-                    }
-                    catch (Exception ex)
+                        
+                        // 进程退出时添加断开连接日志
+                        if (isLogging)
+                        {
+                            string disconnectMessage = string.Format("[{0}] adb devices disconnected", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+                            AddToDisplayBuffer(disconnectMessage);
+                            try
+                            {
+                                File.AppendAllText(logFileName, disconnectMessage + "\r\n");
+                            }
+                            catch (Exception ex)
+                            {
+                                AddToDisplayBuffer(string.Format("[{0}] 文件写入错误: {1}", DateTime.Now, ex.Message));
+                            }
+                        }
+                    };
+
+                    // 实时读取输出
+                    currentAdbProcess.OutputDataReceived += (sender, e) =>
                     {
-                        AddToDisplayBuffer(string.Format("[{0}] 终止ADB进程时出错: {1}", DateTime.Now, ex.Message));
+                        if (!string.IsNullOrEmpty(e.Data) && isLogging)
+                        {
+                            // 更新最后日志时间
+                            lastLogTime = DateTime.Now;
+                            
+                            // 在每一行前面添加PC系统当前时间
+                            string logEntry = string.Format("[PC:{0}] {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"), e.Data);
+                            
+                            // 添加到显示缓冲区
+                            AddToDisplayBuffer(logEntry);
+                            
+                            // 直接写入文件 - 不经过缓冲区
+                            try
+                            {
+                                File.AppendAllText(logFileName, logEntry + "\r\n");
+                            }
+                            catch (Exception ex)
+                            {
+                                AddToDisplayBuffer(string.Format("[{0}] 文件写入错误: {1}", DateTime.Now, ex.Message));
+                            }
+                        }
+                    };
+
+                    currentAdbProcess.ErrorDataReceived += (sender, e) =>
+                    {
+                        if (!string.IsNullOrEmpty(e.Data) && isLogging)
+                        {
+                            // 更新最后日志时间
+                            lastLogTime = DateTime.Now;
+                            
+                            // 在每一行前面添加PC系统当前时间
+                            string errorEntry = string.Format("[PC:{0}] [ERROR] {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"), e.Data);
+                            
+                            // 添加到显示缓冲区
+                            AddToDisplayBuffer(errorEntry);
+                            
+                            // 直接写入文件 - 不经过缓冲区
+                            try
+                            {
+                                File.AppendAllText(logFileName, errorEntry + "\r\n");
+                            }
+                            catch (Exception ex)
+                            {
+                                AddToDisplayBuffer(string.Format("[{0}] 文件写入错误: {1}", DateTime.Now, ex.Message));
+                            }
+                        }
+                    };
+
+                    currentAdbProcess.Start();
+                    currentAdbProcess.BeginOutputReadLine();
+                    currentAdbProcess.BeginErrorReadLine();
+                    
+                    // 使用带超时的等待，而不是无限期等待
+                    while (isLogging && !processExitEvent.WaitOne(500)) // 500毫秒检查一次
+                    {
+                        // 每500毫秒检查一次是否应该停止
+                    }
+                    
+                    // 如果仍在记录状态但进程已退出，说明是意外退出
+                    if (isLogging && currentAdbProcess.HasExited)
+                    {
+                        AddToDisplayBuffer(string.Format("[{0}] ADB进程意外退出，退出代码: {1}", DateTime.Now, currentAdbProcess.ExitCode));
                     }
                 }
             }
+            
+            // 如果仍在记录状态，说明进程意外退出（如设备断开）
+            // 将循环回去重新等待设备连接
+            if (isLogging)
+            {
+                AddToDisplayBuffer(string.Format("[{0}] 设备连接断开，等待重新连接...", DateTime.Now));
+            }
         }
+        catch (Exception ex)
+        {
+            if (isLogging)
+            {
+                AddToDisplayBuffer(string.Format("[{0}] 错误: {1}", DateTime.Now, ex.Message));
+                AddToDisplayBuffer(string.Format("[{0}] 2秒后尝试重新连接...", DateTime.Now));
+                Thread.Sleep(2000); // 重试前等待
+            }
+        }
+    }
+    
+    // 在StopLogging方法中已经添加了停止消息，这里不需要重复
+}
+        private void CheckDeviceStatus(object sender, EventArgs e)
+{
+    if (!isLogging) return;
+    
+    // 检查最后日志时间，如果超过10秒没有新日志，认为设备可能已断开
+    if ((DateTime.Now - lastLogTime).TotalSeconds > 10)
+    {
+        // 检查设备是否真的断开
+        bool deviceConnected = CheckDeviceConnected();
+        if (!deviceConnected && isAdbProcessRunning)
+        {
+            // 添加断开连接日志
+            string disconnectMessage = string.Format("[{0}] adb devices disconnected", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+            AddToDisplayBuffer(disconnectMessage);
+            try
+            {
+                File.AppendAllText(logFileName, disconnectMessage + "\r\n");
+            }
+            catch (Exception ex)
+            {
+                AddToDisplayBuffer(string.Format("[{0}] 文件写入错误: {1}", DateTime.Now, ex.Message));
+            }
+            
+            AddToDisplayBuffer(string.Format("[{0}] 检测到设备断开，正在重新连接...", DateTime.Now));
+            try
+            {
+                // 安全地检查并终止ADB进程
+                if (adbProcess != null && !adbProcess.HasExited)
+                {
+                    adbProcess.Kill();
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                // 忽略"没有与此对象关联的进程"异常
+                isAdbProcessRunning = false;
+            }
+            catch (Exception ex)
+            {
+                AddToDisplayBuffer(string.Format("[{0}] 终止ADB进程时出错: {1}", DateTime.Now, ex.Message));
+            }
+        }
+    }
+}
+
 
         private bool CheckDeviceConnected()
         {
@@ -490,38 +528,40 @@ private bool IsScrolledToBottom()
     
     return firstVisibleLine + visibleLines >= totalLines - 1;
 }
-        private void StopLogging()
-        {
-            isLogging = false;
-            btnStart.Enabled = true;
-            btnStop.Enabled = false;
-            
-            // 停止设备检查定时器
-            deviceCheckTimer.Stop();
+       private void StopLogging()
+{
+    isLogging = false;
+    btnStart.Enabled = true;
+    btnStop.Enabled = false;
+    
+    // 停止设备检查定时器
+    deviceCheckTimer.Stop();
 
-            try
-            {
-                if (adbProcess != null && !adbProcess.HasExited)
-                {
-                    adbProcess.Kill();
-                }
-            }
-            catch (InvalidOperationException)
-            {
-                // 忽略"没有与此对象关联的进程"异常
-            }
-            catch (Exception ex)
-            {
-                AddToDisplayBuffer(string.Format("[{0}] 停止进程时出错: {1}", DateTime.Now, ex.Message));
-            }
-            finally
-            {
-                adbProcess = null;
-                isAdbProcessRunning = false;
-            }
-            
-            AddToDisplayBuffer(string.Format("[{0}] 日志记录已停止", DateTime.Now));
+    try
+    {
+        if (adbProcess != null && !adbProcess.HasExited)
+        {
+            adbProcess.Kill();
         }
+    }
+    catch (InvalidOperationException)
+    {
+        // 忽略"没有与此对象关联的进程"异常
+    }
+    catch (Exception ex)
+    {
+        AddToDisplayBuffer(string.Format("[{0}] 停止进程时出错: {1}", DateTime.Now, ex.Message));
+    }
+    finally
+    {
+        adbProcess = null;
+        isAdbProcessRunning = false;
+    }
+    
+    // 获取完整的文件路径
+    string fullPath = Path.GetFullPath(logFileName);
+    AddToDisplayBuffer(string.Format("[{0}] 日志记录已停止，文件保存在: {1}", DateTime.Now, fullPath));
+}
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
